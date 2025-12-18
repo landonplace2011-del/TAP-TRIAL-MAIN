@@ -1,0 +1,497 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import TapZone from '@/components/game/TapZone';
+import ResourceBars from '@/components/game/ResourceBars';
+import TrialDisplay from '@/components/game/TrialDisplay';
+import UpgradeShop from '@/components/game/UpgradeShop';
+import PrestigePanel from '@/components/game/PrestigePanel';
+import StatsPanel from '@/components/game/StatsPanel';
+import SettingsPanel from '@/components/game/SettingsPanel';
+import BossTrialOverlay from '@/components/game/BossTrialOverlay';
+import NavigationTabs from '@/components/game/NavigationTabs';
+import { Zap, Trophy, Settings, TrendingUp, ShoppingBag } from 'lucide-react';
+
+const INITIAL_STATE = {
+  power: 0,
+  totalPower: 0,
+  focus: 100,
+  maxFocus: 100,
+  focusRegen: 2,
+  tapPower: 1,
+  autoPower: 0,
+  critChance: 5,
+  critMultiplier: 2,
+  currentTrial: 1,
+  trialProgress: 0,
+  resets: 0,
+  resetPoints: 0,
+  totalResets: 0,
+  ascensions: 0,
+  hardcoreMode: false,
+  trialsBeyondMode: false,
+  currentModifiers: [],
+  totalTaps: 0,
+  totalCrits: 0,
+  highestTrial: 1,
+  upgrades: {},
+  achievements: [],
+  lastOnline: Date.now(),
+};
+
+export default function TapTrials() {
+  const [gameState, setGameState] = useState(() => {
+    const saved = localStorage.getItem('tapTrials_save');
+    if (saved) {
+      try {
+        return { ...INITIAL_STATE, ...JSON.parse(saved) };
+      } catch {
+        return INITIAL_STATE;
+      }
+    }
+    return INITIAL_STATE;
+  });
+
+  const [activeTab, setActiveTab] = useState('game');
+  const [floatingNumbers, setFloatingNumbers] = useState([]);
+  const [screenShake, setScreenShake] = useState(false);
+  const [activeBoss, setActiveBoss] = useState(null);
+  const [comboCount, setComboCount] = useState(0);
+  const [lastTapTime, setLastTapTime] = useState(0);
+  const floatingIdRef = useRef(0);
+
+  // Save game
+  useEffect(() => {
+    const saveInterval = setInterval(() => {
+      localStorage.setItem('tapTrials_save', JSON.stringify({
+        ...gameState,
+        lastOnline: Date.now()
+      }));
+    }, 5000);
+    return () => clearInterval(saveInterval);
+  }, [gameState]);
+
+  // Calculate offline progress on load
+  useEffect(() => {
+    const offlineTime = (Date.now() - gameState.lastOnline) / 1000;
+    if (offlineTime > 60 && gameState.autoPower > 0) {
+      const offlinePower = Math.floor(gameState.autoPower * offlineTime * 0.5);
+      if (offlinePower > 0) {
+        setGameState(prev => ({
+          ...prev,
+          power: prev.power + offlinePower,
+          totalPower: prev.totalPower + offlinePower
+        }));
+      }
+    }
+  }, []);
+
+  // Focus regeneration
+  useEffect(() => {
+    const regenInterval = setInterval(() => {
+      setGameState(prev => {
+        const noRegen = prev.currentModifiers.some(m => m.id === 'no-regen');
+        if (noRegen) return prev;
+        
+        return {
+          ...prev,
+          focus: Math.min(prev.maxFocus, prev.focus + prev.focusRegen)
+        };
+      });
+    }, 1000);
+    return () => clearInterval(regenInterval);
+  }, []);
+
+  // Auto power
+  useEffect(() => {
+    if (gameState.autoPower <= 0) return;
+    const autoInterval = setInterval(() => {
+      setGameState(prev => {
+        const reducedAuto = prev.currentModifiers.some(m => m.id === 'reduced-auto');
+        const power = reducedAuto ? prev.autoPower * 0.5 : prev.autoPower;
+        
+        return {
+          ...prev,
+          power: prev.power + power,
+          totalPower: prev.totalPower + power,
+          trialProgress: prev.trialProgress + power
+        };
+      });
+    }, 1000);
+    return () => clearInterval(autoInterval);
+  }, [gameState.autoPower]);
+
+  // Combo decay
+  useEffect(() => {
+    const comboDecay = setInterval(() => {
+      if (Date.now() - lastTapTime > 1500) {
+        setComboCount(0);
+      }
+    }, 500);
+    return () => clearInterval(comboDecay);
+  }, [lastTapTime]);
+
+  // Check trial completion
+  useEffect(() => {
+    const trialRequirement = getTrialRequirement(gameState.currentTrial);
+    if (gameState.trialProgress >= trialRequirement) {
+      // Check for boss trial
+      if (gameState.currentTrial % 10 === 0 && !activeBoss) {
+        setActiveBoss({
+          trial: gameState.currentTrial,
+          health: 100,
+          maxHealth: 100,
+          pattern: generateBossPattern(),
+          timeLeft: 30
+        });
+      } else if (!activeBoss) {
+        completeTrialHandler();
+      }
+    }
+  }, [gameState.trialProgress, gameState.currentTrial]);
+
+  const getTrialRequirement = (trial) => {
+    const base = 100;
+    const scaling = Math.pow(1.5, trial - 1);
+    const resetBonus = 1 + (gameState.resets * 0.1);
+    const beyondMultiplier = gameState.trialsBeyondMode ? 2.5 : 1;
+    return Math.floor(base * scaling / resetBonus * beyondMultiplier);
+  };
+
+  const generateTrialModifiers = () => {
+    if (!gameState.trialsBeyondMode) return [];
+    
+    const allModifiers = [
+      { id: 'no-crits', name: 'Critical Failure', desc: 'Critical hits disabled', icon: '⚠️' },
+      { id: 'focus-drain', name: 'Mental Fatigue', desc: 'Focus drains 2x faster', icon: '🧠' },
+      { id: 'reduced-auto', name: 'Power Shortage', desc: 'Auto power reduced by 50%', icon: '⚡' },
+      { id: 'combo-reset', name: 'Momentum Loss', desc: 'Combos reset faster', icon: '💥' },
+      { id: 'high-requirement', name: 'Excessive Demand', desc: 'Trial requirement +100%', icon: '📈' },
+      { id: 'no-regen', name: 'Exhaustion', desc: 'Focus stops regenerating', icon: '🔋' },
+    ];
+    
+    // Select 2 random modifiers for trials beyond
+    const shuffled = [...allModifiers].sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, 2);
+  };
+
+  const generateBossPattern = () => {
+    const patterns = ['tap-burst', 'hold', 'rhythm', 'avoid'];
+    return patterns[Math.floor(Math.random() * patterns.length)];
+  };
+
+  const completeTrialHandler = () => {
+    setGameState(prev => {
+      const newTrial = prev.currentTrial + 1;
+      const newModifiers = prev.trialsBeyondMode && newTrial % 5 === 0 
+        ? generateTrialModifiers() 
+        : prev.currentModifiers;
+      
+      return {
+        ...prev,
+        currentTrial: newTrial,
+        trialProgress: 0,
+        highestTrial: Math.max(prev.highestTrial, newTrial),
+        currentModifiers: newModifiers
+      };
+    });
+  };
+
+  const handleTap = useCallback((e) => {
+    let focusCost = gameState.hardcoreMode ? 3 : 1;
+    
+    // Apply modifiers
+    if (gameState.currentModifiers.some(m => m.id === 'focus-drain')) {
+      focusCost *= 2;
+    }
+    
+    if (gameState.focus < focusCost) return;
+
+    const now = Date.now();
+    const timeSinceLastTap = now - lastTapTime;
+    
+    // Combo system
+    let newCombo = comboCount;
+    if (timeSinceLastTap < 500) {
+      newCombo = Math.min(comboCount + 1, 50);
+    } else if (timeSinceLastTap > 1500) {
+      newCombo = 0;
+    }
+    setComboCount(newCombo);
+    setLastTapTime(now);
+
+    // Calculate power
+    const critsDisabled = gameState.currentModifiers.some(m => m.id === 'no-crits');
+    const isCrit = !critsDisabled && Math.random() * 100 < gameState.critChance;
+    const comboMultiplier = 1 + (newCombo * 0.02);
+    let power = gameState.tapPower * comboMultiplier;
+    
+    if (isCrit) {
+      power *= gameState.critMultiplier;
+    }
+    
+    power = Math.floor(power);
+
+    // Get tap position for floating number
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Add floating number
+    const id = floatingIdRef.current++;
+    setFloatingNumbers(prev => [...prev, {
+      id,
+      value: power,
+      x,
+      y,
+      isCrit
+    }]);
+    setTimeout(() => {
+      setFloatingNumbers(prev => prev.filter(n => n.id !== id));
+    }, 1000);
+
+    // Screen shake on crits
+    if (isCrit) {
+      setScreenShake(true);
+      setTimeout(() => setScreenShake(false), 100);
+    }
+
+    setGameState(prev => ({
+      ...prev,
+      power: prev.power + power,
+      totalPower: prev.totalPower + power,
+      focus: Math.max(0, prev.focus - focusCost),
+      trialProgress: prev.trialProgress + power,
+      totalTaps: prev.totalTaps + 1,
+      totalCrits: prev.totalCrits + (isCrit ? 1 : 0)
+    }));
+  }, [gameState, comboCount, lastTapTime]);
+
+  const handleBossTap = useCallback(() => {
+    if (!activeBoss) return;
+    
+    const damage = gameState.tapPower * (1 + gameState.resets * 0.2);
+    setActiveBoss(prev => ({
+      ...prev,
+      health: Math.max(0, prev.health - damage / 10)
+    }));
+
+    if (activeBoss.health - damage / 10 <= 0) {
+      setActiveBoss(null);
+      completeTrialHandler();
+    }
+  }, [activeBoss, gameState.tapPower, gameState.resets]);
+
+  const purchaseUpgrade = (upgrade) => {
+    if (gameState.power < upgrade.cost) return;
+    
+    setGameState(prev => {
+      const currentLevel = prev.upgrades[upgrade.id] || 0;
+      const newState = {
+        ...prev,
+        power: prev.power - upgrade.cost,
+        upgrades: {
+          ...prev.upgrades,
+          [upgrade.id]: currentLevel + 1
+        }
+      };
+
+      // Apply upgrade effect
+      switch (upgrade.type) {
+        case 'tapPower':
+          newState.tapPower = prev.tapPower + upgrade.effect;
+          break;
+        case 'autoPower':
+          newState.autoPower = prev.autoPower + upgrade.effect;
+          break;
+        case 'critChance':
+          newState.critChance = Math.min(100, prev.critChance + upgrade.effect);
+          break;
+        case 'critMultiplier':
+          newState.critMultiplier = prev.critMultiplier + upgrade.effect;
+          break;
+        case 'maxFocus':
+          newState.maxFocus = prev.maxFocus + upgrade.effect;
+          newState.focus = prev.focus + upgrade.effect;
+          break;
+        case 'focusRegen':
+          newState.focusRegen = prev.focusRegen + upgrade.effect;
+          break;
+      }
+
+      return newState;
+    });
+  };
+
+  const performReset = () => {
+    const resetPointsGained = Math.floor(Math.sqrt(gameState.currentTrial));
+    const unlockBeyond = gameState.totalResets + 1 >= 10;
+    
+    setGameState(prev => ({
+      ...INITIAL_STATE,
+      resets: prev.resets + 1,
+      totalResets: prev.totalResets + 1,
+      resetPoints: prev.resetPoints + resetPointsGained,
+      highestTrial: prev.highestTrial,
+      totalTaps: prev.totalTaps,
+      totalCrits: prev.totalCrits,
+      hardcoreMode: prev.hardcoreMode,
+      trialsBeyondMode: unlockBeyond ? prev.trialsBeyondMode : false,
+      tapPower: 1 + (prev.resets + 1) * 0.5,
+      autoPower: (prev.resets + 1) * 0.1,
+      achievements: prev.achievements
+    }));
+  };
+
+  const toggleTrialsBeyond = () => {
+    setGameState(prev => ({
+      ...prev,
+      trialsBeyondMode: !prev.trialsBeyondMode,
+      currentModifiers: !prev.trialsBeyondMode ? generateTrialModifiers() : []
+    }));
+  };
+
+  const tabs = [
+    { id: 'game', label: 'Trials', icon: Zap },
+    { id: 'upgrades', label: 'Upgrades', icon: ShoppingBag },
+    { id: 'prestige', label: 'Reset', icon: TrendingUp },
+    { id: 'stats', label: 'Stats', icon: Trophy },
+    { id: 'settings', label: 'Settings', icon: Settings },
+  ];
+
+  return (
+    <div className="min-h-screen bg-[#0a0a0f] text-white overflow-hidden">
+      <motion.div
+        animate={screenShake ? { x: [-2, 2, -2, 0] } : {}}
+        transition={{ duration: 0.1 }}
+        className="h-screen flex flex-col"
+      >
+        {/* Header */}
+        <div className="px-4 pt-4 pb-2">
+          <div className="flex items-center justify-between mb-3">
+            <h1 className="text-2xl font-black bg-gradient-to-r from-violet-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent">
+              TapTrials
+            </h1>
+            {gameState.resets > 0 && (
+              <div className="flex items-center gap-2 px-3 py-1 bg-violet-500/20 rounded-full border border-violet-500/30">
+                <TrendingUp className="w-4 h-4 text-violet-400" />
+                <span className="text-sm font-bold text-violet-300">Reset {gameState.resets}</span>
+              </div>
+            )}
+          </div>
+          <ResourceBars gameState={gameState} comboCount={comboCount} />
+        </div>
+
+        {/* Main Content */}
+        <div className="flex-1 overflow-hidden">
+          <AnimatePresence mode="wait">
+            {activeTab === 'game' && (
+              <motion.div
+                key="game"
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="h-full flex flex-col px-4"
+              >
+                <TrialDisplay 
+                  currentTrial={gameState.currentTrial}
+                  progress={gameState.trialProgress}
+                  requirement={getTrialRequirement(gameState.currentTrial)}
+                  trialsBeyondMode={gameState.trialsBeyondMode}
+                  modifiers={gameState.currentModifiers}
+                />
+                <div className="flex-1 flex items-center justify-center py-4">
+                  <TapZone 
+                    onTap={handleTap}
+                    floatingNumbers={floatingNumbers}
+                    tapPower={gameState.tapPower}
+                    focus={gameState.focus}
+                    maxFocus={gameState.maxFocus}
+                  />
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'upgrades' && (
+              <motion.div
+                key="upgrades"
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="h-full overflow-y-auto px-4 pb-32"
+              >
+                <UpgradeShop 
+                  power={gameState.power}
+                  upgrades={gameState.upgrades}
+                  resets={gameState.resets}
+                  onPurchase={purchaseUpgrade}
+                />
+              </motion.div>
+            )}
+
+            {activeTab === 'prestige' && (
+              <motion.div
+                key="prestige"
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="h-full overflow-y-auto px-4 pb-32"
+              >
+                <PrestigePanel 
+                  gameState={gameState}
+                  onReset={performReset}
+                  getTrialRequirement={getTrialRequirement}
+                />
+              </motion.div>
+            )}
+
+            {activeTab === 'stats' && (
+              <motion.div
+                key="stats"
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="h-full overflow-y-auto px-4 pb-32"
+              >
+                <StatsPanel gameState={gameState} />
+              </motion.div>
+            )}
+
+            {activeTab === 'settings' && (
+              <motion.div
+                key="settings"
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                className="h-full overflow-y-auto px-4 pb-32"
+              >
+                <SettingsPanel 
+                  gameState={gameState}
+                  setGameState={setGameState}
+                  INITIAL_STATE={INITIAL_STATE}
+                  onToggleTrialsBeyond={toggleTrialsBeyond}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* Navigation */}
+        <NavigationTabs tabs={tabs} activeTab={activeTab} setActiveTab={setActiveTab} />
+
+        {/* Boss Overlay */}
+        <AnimatePresence>
+          {activeBoss && (
+            <BossTrialOverlay 
+              boss={activeBoss}
+              onTap={handleBossTap}
+              onTimeout={() => {
+                setActiveBoss(null);
+                setGameState(prev => ({ ...prev, trialProgress: 0 }));
+              }}
+            />
+          )}
+        </AnimatePresence>
+      </motion.div>
+    </div>
+  );
+}
